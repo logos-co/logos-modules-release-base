@@ -1,0 +1,56 @@
+name: Release all modules
+
+# Umbrella workflow: releases every submodule in this catalog in
+# parallel. Useful for the initial bootstrap right after you fork and
+# add your modules, and for coordinated "everything at once" releases.
+#
+# Unlike a hand-maintained build matrix, the module list is DISCOVERED
+# from `.gitmodules` at run time — add or remove a submodule and this
+# workflow tracks it automatically, no edits here ever needed.
+#
+# Each module is released through the same _release-module.yml local
+# reusable workflow the per-module files use, so signing config stays
+# consistent between solo and bulk runs. `fail-fast: false` lets one
+# module's build fail without aborting the rest.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.scan.outputs.matrix }}
+      count: ${{ steps.scan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every `path = submodules/<repo>` entry in .gitmodules.
+          paths="$(git config --file .gitmodules --get-regexp 'submodule\..*\.path$' 2>/dev/null \
+                   | awk '{print $2}' | sort -u || true)"
+          if [ -z "${paths}" ]; then
+            echo 'matrix={"module_path":[]}' >> "$GITHUB_OUTPUT"
+            echo 'count=0' >> "$GITHUB_OUTPUT"
+            echo "No submodules declared in .gitmodules — nothing to release."
+            exit 0
+          fi
+          matrix="$(printf '%s\n' ${paths} | jq -R . | jq -cs '{module_path: .}')"
+          count="$(printf '%s\n' ${paths} | wc -l | tr -d ' ')"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "count=${count}"  >> "$GITHUB_OUTPUT"
+          echo "Discovered ${count} module(s):"
+          printf '  %s\n' ${paths}
+
+  release:
+    needs: discover
+    if: ${{ needs.discover.outputs.count != '0' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/_release-module.yml
+    with:
+      module_path: ${{ matrix.module_path }}
+    secrets: inherit
